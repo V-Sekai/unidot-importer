@@ -4,9 +4,9 @@
 @tool
 extends Resource
 
-const asset_meta_class: GDScript = preload("./asset_meta.gd")
-const object_adapter_class: GDScript = preload("./object_adapter.gd")
-const vrm_integration_class: GDScript = preload("./vrm_integration.gd")
+const asset_meta_class := preload("./asset_meta.gd")
+const object_adapter_class := preload("./object_adapter.gd")
+const vrm_integration_class := preload("./vrm_integration.gd")
 
 const ASSET_DATABASE_PATH: String = "res://unidot_asset_database.res"
 
@@ -26,6 +26,7 @@ var log_message_holder = asset_meta_class.LogMessageHolder.new()
 @export var enable_verbose_logs: bool = false
 @export var set_animation_trees_active: bool = true
 @export var vrm_spring_bones: bool = true
+@export var convert_fbx_to_gltf: bool = false
 var vrm_integration_plugin
 var log_limit_per_guid: int = 100000
 

@@ -4,10 +4,10 @@
 @tool
 extends Resource
 
-const yaml_parser_class: GDScript = preload("./yaml_parser.gd")
-const object_adapter_class: GDScript = preload("./object_adapter.gd")
-const bin_parser_class: GDScript = preload("./deresuteme/decode.gd")
-const unidot_utils_class: GDScript = preload("./unidot_utils.gd")
+const yaml_parser_class := preload("./yaml_parser.gd")
+const object_adapter_class := preload("./object_adapter.gd")
+const bin_parser_class := preload("./deresuteme/decode.gd")
+const unidot_utils_class := preload("./unidot_utils.gd")
 var unidot_utils := unidot_utils_class.new()
 
 
@@ -67,6 +67,7 @@ var prefab_fileid_to_skeleton_bone = {}  # int -> string
 var prefab_fileid_to_utype = {}  # int -> int
 var prefab_type_to_fileids = {}  # int -> int
 var prefab_fileid_to_gameobject_fileid: Dictionary = {}  # int -> int
+var prefab_fileid_to_material_order_rev: Dictionary = {}
 var fileid_to_component_fileids: Dictionary = {}  # int -> int
 # TODO: remove @export
 @export var prefab_gameobject_name_to_fileid_and_children: Dictionary = {}  # {null: 400000, "SomeName": {null: 1234, "SomeName2": ...}
@@ -83,6 +84,7 @@ var fileid_to_component_fileids: Dictionary = {}  # int -> int
 @export var fileid_to_skeleton_bone: Dictionary = {}  # int -> string: scene_node_state.add_fileID_to_skeleton_bone
 @export var fileid_to_utype: Dictionary = {}  # int -> int: parse_binary_asset/parse_asset
 @export var fileid_to_gameobject_fileid: Dictionary = {}  # int -> int: parse_binary_asset/parse_asset
+@export var fileid_to_material_order_rev: Dictionary = {}  # Mesh OR MeshRenderer fileID int -> PackedInt32Array
 @export var type_to_fileids: Dictionary = {}  # string -> Array[int]: parse_binary_asset/parse_asset
 @export var godot_resources: Dictionary = {}  # int -> Resource: insert_resource/override_resource
 @export var main_object_id: int = 0  # e.g. 2100000 for .mat; 100000 for .fbx or GameObject; 100100000 for .prefab
@@ -103,6 +105,9 @@ var fileid_to_component_fileids: Dictionary = {}  # int -> int
 @export var imported_animation_paths: Dictionary # anim_name -> file_path
 @export var imported_mesh_paths: Dictionary # mesh_name (with and without "Root Scene_") -> file_path
 @export var imported_material_paths: Dictionary # material_name -> file_path
+
+var taken_over_import_references: Dictionary = {} # String -> Resource
+@export var unique_texture_map: Dictionary
 
 class ParsedAsset:
 	extends RefCounted
@@ -249,6 +254,12 @@ func is_humanoid() -> bool:
 	if autodetected_bone_map_dict.is_empty() and humanoid_bone_map_dict.is_empty() and humanoid_bone_map_crc32_dict.is_empty():
 		return false
 	return true
+
+func is_using_builtin_ufbx() -> bool:
+	# if Engine.get_version_info().hex >= 0x040300:
+	if ClassDB.class_exists(&"FBXDocument") and ClassDB.class_exists(&"FBXState"):
+		return not log_database_holder.database.convert_fbx_to_gltf
+	return false
 
 
 # Set to false to debug or avoid auto-playing animations
@@ -417,6 +428,10 @@ func remap_prefab_fileids(prefab_fileid: int, target_prefab_meta: Resource):
 		self.prefab_transform_fileid_to_scale_signs[xor_or_stripped(target_fileid, prefab_fileid)] = target_prefab_meta.transform_fileid_to_scale_signs.get(target_fileid)
 	for target_fileid in target_prefab_meta.prefab_transform_fileid_to_scale_signs:
 		self.prefab_transform_fileid_to_scale_signs[xor_or_stripped(target_fileid, prefab_fileid)] = target_prefab_meta.prefab_transform_fileid_to_scale_signs.get(target_fileid)
+	for target_fileid in target_prefab_meta.fileid_to_material_order_rev:
+		self.prefab_fileid_to_material_order_rev[xor_or_stripped(target_fileid, prefab_fileid)] = target_prefab_meta.fileid_to_material_order_rev.get(target_fileid)
+	for target_fileid in target_prefab_meta.prefab_fileid_to_material_order_rev:
+		self.prefab_fileid_to_material_order_rev[xor_or_stripped(target_fileid, prefab_fileid)] = target_prefab_meta.prefab_fileid_to_material_order_rev.get(target_fileid)
 
 
 func calculate_prefab_nodepaths_recursive():

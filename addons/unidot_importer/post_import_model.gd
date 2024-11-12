@@ -4,9 +4,9 @@
 @tool
 extends EditorScenePostImport
 
-const asset_database_class: GDScript = preload("./asset_database.gd")
-const asset_meta_class: GDScript = preload("./asset_meta.gd")
-const object_adapter_class: GDScript = preload("./object_adapter.gd")
+const asset_database_class := preload("./asset_database.gd")
+const asset_meta_class := preload("./asset_meta.gd")
+const object_adapter_class := preload("./object_adapter.gd")
 const unidot_utils_class = preload("./unidot_utils.gd")
 
 # Use this as an example script for writing your own custom post-import scripts. The function requires you pass a table
@@ -35,6 +35,7 @@ class ParseState:
 	var object_adapter: Object
 	var scene: Node
 	var toplevel_node: Node
+	var root_bone_idx: int = -1
 	var metaobj: Resource
 	var source_file_path: String
 	var extracted_assets_basename: String
@@ -49,9 +50,11 @@ class ParseState:
 	var external_objects_by_type_name: Dictionary = {}.duplicate()  # type -> name -> UnidotRef Array
 	var material_to_texture_name: Dictionary = {}.duplicate()  # for Extract Legacy Materials / By Base Texture Name
 	var animation_to_take_name: Dictionary = {}.duplicate()
+	var material_order_by_mesh_rev: Dictionary
 
 	var saved_materials_by_name: Dictionary = {}.duplicate()
 	var saved_meshes_by_name: Dictionary = {}.duplicate()
+	var saved_mesh_fileids_by_name: Dictionary = {}.duplicate()
 	var saved_skins_by_name: Dictionary = {}.duplicate()
 	var saved_animations_by_name: Dictionary = {}.duplicate()
 
@@ -156,16 +159,20 @@ class ParseState:
 			# metaobj.log_debug(0, "Lookup bone name " + str(p_obj_name) + " -> " + str(obj_name))
 		return self.godot_sanitized_to_orig_remap.get(obj_gltf_type, {}).get(obj_name, obj_name)
 
+	func get_orig_bone_or_node(p_obj_name: String) -> String:
+		return self.godot_sanitized_to_orig_remap.get("nodes", {}).get(p_obj_name,
+			self.godot_sanitized_to_orig_remap.get("bone_name", {}).get(p_obj_name, p_obj_name))
+
 	func build_skinned_name_to_node_map(node: Node, p_name_to_node_dict: Dictionary) -> Dictionary:
 		var name_to_node_dict: Dictionary = p_name_to_node_dict
-		var node_name = get_orig_name("nodes", node.name)
+		var node_name = get_orig_bone_or_node(node.name)
 		for child in node.get_children():
 			name_to_node_dict = build_skinned_name_to_node_map(child, name_to_node_dict)
-		# metaobj.log_debug(0, "node.name " + str(node_name) + ": " + str(name_to_node_dict))
+		metaobj.log_debug(0, "node.name " + str(node_name) + ": " + str(name_to_node_dict))
 		if node is MeshInstance3D:
 			if node.skin != null:
 				name_to_node_dict[node_name] = node
-				# metaobj.log_debug(0, "adding " + str(node_name) + ": " + str(name_to_node_dict))
+				metaobj.log_debug(0, "adding " + str(node_name) + ": " + str(name_to_node_dict))
 		return name_to_node_dict
 
 	func get_resource_path(sanitized_name: String, extension: String) -> String:
@@ -211,7 +218,7 @@ class ParseState:
 		if child_node is Skeleton3D:
 			if len(child_node.get_parentless_bones()) > 1:
 				return false
-			var root_bone_idx: int = child_node.get_parentless_bones()[0]
+			root_bone_idx = child_node.get_parentless_bones()[0]
 			root_rotation_delta = root_rotation_delta * child_node.transform * child_node.get_bone_pose(root_bone_idx)
 			toplevel_node = child_node
 			return true
@@ -221,7 +228,7 @@ class ParseState:
 			return true
 		return false
 
-	func register_component(node: Node, p_path: PackedStringArray, p_component: String, fileId_go: int = 0, p_bone_idx: int = -1, parent_transform_id: int = 0):
+	func register_component(node: Node, p_path: PackedStringArray, p_component: String, fileId_go: int = 0, p_bone_idx: int = -1, parent_transform_id: int = 0) -> int:
 		#???
 		#if node == toplevel_node:
 		#	return # GameObject nodes always point to the toplevel node.
@@ -272,7 +279,9 @@ class ParseState:
 			if p_component == "Transform":
 				fileid_to_skeleton_bone[fileId_go] = og_bone_name
 		#metaobj.log_debug(0, "fileid_go:" + str(fileId_go) + '/ ' + str(all_name_map[fileId_go]))
-		return fileId_go
+		if p_component == "Transform":
+			return fileId_go
+		return fileId_comp
 
 	func register_resource(p_resource: Resource, p_name: String, p_type: String, fileId_object: int, p_aux_resource: Variant = null):
 		# Using : Variant for argument 5 to workaround the following GDScript bug:
@@ -299,21 +308,24 @@ class ParseState:
 		var fileId_transform: int = all_name_map[fileId_go][4]
 		var bone_name: String = node.get_bone_name(p_skel_bone)
 
+		if p_skel_bone == root_bone_idx:
+			p_pre_retarget_global_rest *= (node.transform * node.get_bone_pose(root_bone_idx)).affine_inverse()
+
 		#	ParOrigT * ChildOrigT = GodotHumanT * X * ChildOrigT
 		#	GodotHumanT = ParOrigT * GodotCorrectionT
 		#	We want to solve for X = GodotCorrectionT.inv
 		#	GodotCorrectionT = ParOrigT.inv * GodotHumanT
 		if humanoid_original_transforms.has(bone_name):
-			p_pre_retarget_global_rest *= Transform3D(humanoid_original_transforms.get(bone_name).basis, p_pre_retarget_global_rest.basis.inverse() * p_global_rest.basis * node.get_bone_rest(p_skel_bone).origin)
-			metaobj.log_debug(0, "Humanoid Bone " + str(bone_name) + ": " + str(humanoid_original_transforms.get(bone_name).basis.get_rotation_quaternion()))
+			p_pre_retarget_global_rest *= Transform3D(humanoid_original_transforms.get(bone_name).basis, p_pre_retarget_global_rest.basis.inverse() * p_global_rest.basis * node.get_bone_pose(p_skel_bone).origin)
+			metaobj.log_debug(0, "Humanoid Bone " + str(bone_name) + ": " + str(humanoid_original_transforms.get(bone_name).basis.get_rotation_quaternion()) + " origin: " + str(humanoid_original_transforms.get(bone_name).origin))
 			if bone_name == "Hips":
-				humanoid_skeleton_hip_position = node.get_bone_rest(p_skel_bone).origin
+				humanoid_skeleton_hip_position = node.get_bone_pose(p_skel_bone).origin
 				humanoid_skeleton_hip_position.y = node.motion_scale
 		else:
-			p_pre_retarget_global_rest *= node.get_bone_rest(p_skel_bone)
-			# metaobj.log_debug(0, "Non-humanoid Bone " + str(bone_name) + ": " + str(node.get_bone_rest(p_skel_bone).basis.get_rotation_quaternion()))
-		p_global_rest *= node.get_bone_rest(p_skel_bone)
-		# metaobj.log_debug(0, "global rest " + str(bone_name) + ": " + str(node.get_bone_rest(p_skel_bone).basis.get_rotation_quaternion()))
+			p_pre_retarget_global_rest *= node.get_bone_pose(p_skel_bone)
+			# metaobj.log_debug(0, "Non-humanoid Bone " + str(bone_name) + ": " + str(node.get_bone_pose(p_skel_bone).basis.get_rotation_quaternion()))
+		p_global_rest *= node.get_bone_pose(p_skel_bone)
+		# metaobj.log_debug(0, "global rest " + str(bone_name) + ": " + str(node.get_bone_pose(p_skel_bone).basis.get_rotation_quaternion()))
 
 		if not p_global_rest.is_equal_approx(p_pre_retarget_global_rest):
 			# metaobj.log_debug(0, "bone " + bone_name + " rest " + str(p_global_rest) + " pre ret " + str(p_pre_retarget_global_rest))
@@ -334,12 +346,14 @@ class ParseState:
 			var attachment_node: Node = p_attachment
 			for child in attachment_node.get_children():
 				if child is MeshInstance3D:
+					var renderer_fileId: int
 					if child.get_blend_shape_count() > 0:  # if skin != null
-						register_component(child, p_path, "SkinnedMeshRenderer", fileId_go, p_skel_bone)
+						renderer_fileId = register_component(child, p_path, "SkinnedMeshRenderer", fileId_go, p_skel_bone)
 					else:
 						register_component(child, p_path, "MeshFilter", fileId_go, p_skel_bone)
-						register_component(child, p_path, "MeshRenderer", fileId_go, p_skel_bone)
-					process_mesh_instance(child)
+						renderer_fileId = register_component(child, p_path, "MeshRenderer", fileId_go, p_skel_bone)
+					var mesh_fileId = process_mesh_instance(child)
+					metaobj.fileid_to_material_order_rev[renderer_fileId] = metaobj.fileid_to_material_order_rev.get(mesh_fileId, PackedInt32Array())
 				elif child is Camera3D:
 					register_component(child, p_path, "Camera", fileId_go, p_skel_bone)
 				elif child is Light3D:
@@ -381,7 +395,7 @@ class ParseState:
 		skinned_parent_to_node.erase(key)
 		for child in skinned_children:
 			metaobj.log_debug(0, "Skinned parent " + str(node.name) + ": " + str(child.name))
-			var orig_child_name: String = get_orig_name("nodes", child.name)
+			var orig_child_name: String = get_orig_bone_or_node(child.name)
 			var new_id: int = 0
 			if len(p_path) == 1:
 				# If not preserve_hierarchy and we determined we can fold root node, that means skinned parents is empty.
@@ -416,12 +430,14 @@ class ParseState:
 				if node.skin != null and not skinned_parent_to_node.is_empty() and not from_skinned_parent:
 					metaobj.log_debug(0, "Already recursed " + str(node.name))
 					return 0  # We already recursed into this skinned mesh.
+				var renderer_fileId: int
 				if from_skinned_parent or node.get_blend_shape_count() > 0:  # has_obj_id("SkinnedMeshRenderer", node_name):
-					register_component(node, p_path, "SkinnedMeshRenderer", fileId_go)
+					renderer_fileId = register_component(node, p_path, "SkinnedMeshRenderer", fileId_go)
 				else:
 					register_component(node, p_path, "MeshFilter", fileId_go)
-					register_component(node, p_path, "MeshRenderer", fileId_go)
-				process_mesh_instance(node)
+					renderer_fileId = register_component(node, p_path, "MeshRenderer", fileId_go)
+				var mesh_fileId = process_mesh_instance(node)
+				metaobj.fileid_to_material_order_rev[renderer_fileId] = metaobj.fileid_to_material_order_rev.get(mesh_fileId, PackedInt32Array())
 			elif node is Camera3D:
 				register_component(node, p_path, "Camera", fileId_go)
 			elif node is Light3D:
@@ -521,7 +537,7 @@ class ParseState:
 			skinned_parent_to_node.erase(key)
 			for child in skinned_children:
 				metaobj.log_debug(0, "Skinned parent from non-bone " + str(node.name) + ": " + str(child.name))
-				var orig_child_name: String = get_orig_name("nodes", child.name)
+				var orig_child_name: String = get_orig_bone_or_node(child.name)
 				var new_id: int = 0
 				if len(p_path) == 1:
 					# If not preserve_hierarchy and we determined we can fold root node, that means skinned parents is empty.
@@ -586,7 +602,7 @@ class ParseState:
 			# metaobj.log_debug(0, "AnimationPlayer " + str(scene.get_path_to(node)) + " / Anim " + str(i) + " anim_name: " + anim_name + " resource_name: " + str(anim.resource_name))
 			i += 1
 
-	func process_mesh_instance(node: MeshInstance3D):
+	func process_mesh_instance(node: MeshInstance3D) -> int:
 		metaobj.log_debug(0, "Process mesh instance: " + str(node.name))
 		if node.skin == null and node.skeleton != NodePath():
 			metaobj.log_fail(0, "A Skeleton exists for MeshRenderer " + str(node.name))
@@ -594,7 +610,7 @@ class ParseState:
 			metaobj.log_fail(0, "No Skeleton exists for SkinnedMeshRenderer " + str(node.name))
 		var mesh: Mesh = node.mesh
 		if mesh == null:
-			return
+			return 0
 		# FIXME: mesh_name is broken on master branch, maybe 3.2 as well.
 		var godot_mesh_name: String = str(mesh.resource_name)
 		if godot_mesh_name.begins_with("Root Scene_"):
@@ -602,8 +618,10 @@ class ParseState:
 		if is_obj:
 			godot_mesh_name = default_obj_mesh_name
 		var mesh_name: String = get_orig_name("meshes", godot_mesh_name)
+		var mesh_fileId: int = 0
 		if saved_meshes_by_name.has(godot_mesh_name):
 			mesh = saved_meshes_by_name.get(godot_mesh_name)
+			mesh_fileId = saved_mesh_fileids_by_name[godot_mesh_name]
 			if mesh != null:
 				node.mesh = mesh
 			if node.skin != null:
@@ -616,7 +634,7 @@ class ParseState:
 					continue
 				var godot_mat_name: String = mat.resource_name
 				var mat_name: String = get_orig_name("materials", godot_mat_name)
-				if mat_name == "DefaultMaterial":
+				if mat_name == "DefaultMaterial" or mat_name == "":
 					mat_name = "No Name"
 				if is_obj:
 					mat_name = default_obj_mesh_name + "Mat"  # obj files seem to use this rule
@@ -645,6 +663,8 @@ class ParseState:
 					elif importMaterials and extractLegacyMaterials:
 						# Exmaple [S*S]kitsune_men.material -> [S_S]kitsune_men.material
 						var legacy_material_name: String = sanitize_filename(godot_mat_name, "_") # It's unclear what should happen if this contains a "." character.
+						if legacy_material_name.is_empty():
+							legacy_material_name = "No Name"
 						if legacy_material_name_setting == 0:
 							legacy_material_name = sanitize_filename(material_to_texture_name.get(godot_mat_name, godot_mat_name), "_")
 						if legacy_material_name_setting == 2:
@@ -682,12 +702,27 @@ class ParseState:
 						else:
 							metaobj.log_fail(fileId, "Material " + str(legacy_material_name) + " was not found. using default")
 					if new_mat == null and mat != null:
-						var respath: String = get_resource_path(godot_mat_name, ".material")
+						var respath: String
+						if godot_mat_name.is_empty():
+							respath = get_resource_path("DefaultMaterial", ".material")
+						else:
+							respath = get_resource_path(godot_mat_name, ".material")
 						metaobj.log_debug(fileId, "Before save " + str(mat_name) + " " + str(mat.resource_name) + "@" + str(respath) + " from " + str(mat.resource_path))
 						if mat.albedo_texture != null:
 							metaobj.log_debug(fileId, "    albedo = " + str(mat.albedo_texture.resource_name) + " / " + str(mat.albedo_texture.resource_path))
 						if mat.normal_texture != null:
 							metaobj.log_debug(fileId, "    normal = " + str(mat.normal_texture.resource_name) + " / " + str(mat.normal_texture.resource_path))
+						for prop in mat.get_property_list():
+							var prop_name: String = prop["name"]
+							if (prop["usage"] & PROPERTY_USAGE_STORAGE) != 0 and prop["hint_string"].contains("Texture"):
+								var tex: Texture2D = mat.get(prop_name) as Texture2D
+								# metaobj.log_debug(fileId, "Tex " + str(tex) + " for prop " + str(prop_name))
+								if tex != null and tex.has_meta(&"src_tex"):
+									# metaobj.log_debug(fileId, "tmp tex " + str(tex.resource_path) + " meta list " + str(tex.get_meta_list()) + " " + str(tex.get_meta(&"src_tex")))
+									var src_tex: Texture2D = tex.get_meta(&"src_tex") as Texture2D
+									if src_tex != null:
+										metaobj.log_debug(fileId, "    " + str(prop_name) + " = " + str(tex.resource_path) + " => " + str(src_tex.resource_path))
+										mat.set(prop_name, src_tex)
 						unidot_utils.save_resource(mat, respath)
 						mat = load(respath)
 						metaobj.log_debug(fileId, "Save-and-load material object " + str(mat_name) + " " + str(mat.resource_name) + "@" + str(mat.resource_path))
@@ -710,6 +745,7 @@ class ParseState:
 			if fileId == 0:
 				metaobj.log_fail(0, "Missing fileId for Mesh " + str(mesh_name) + " (" + str(godot_mesh_name) + ")")
 			else:
+				metaobj.fileid_to_material_order_rev[fileId] = material_order_by_mesh_rev.get(godot_mesh_name, PackedInt32Array())
 				var skin: Skin = node.skin
 				if external_objects_by_id.has(fileId):
 					mesh = metaobj.get_godot_resource(external_objects_by_id.get(fileId))
@@ -731,6 +767,8 @@ class ParseState:
 				if mesh != null:
 					node.mesh = mesh
 					saved_meshes_by_name[godot_mesh_name] = mesh
+					mesh_fileId = fileId
+					saved_mesh_fileids_by_name[godot_mesh_name] = mesh_fileId
 					metaobj.imported_mesh_paths[godot_mesh_name] = str(mesh.resource_path)
 					metaobj.imported_mesh_paths["Root Scene_" + godot_mesh_name] = str(mesh.resource_path)
 					register_resource(mesh, mesh_name, "Mesh", fileId, skin)
@@ -738,6 +776,7 @@ class ParseState:
 						node.skin = skin
 						saved_skins_by_name[godot_mesh_name] = skin
 		is_obj = false
+		return mesh_fileId
 
 func _post_import(p_scene: Node) -> Object:
 	var source_file_path: String = get_source_file()
@@ -774,6 +813,7 @@ func _post_import(p_scene: Node) -> Object:
 	ps.extracted_assets_basename = get_extracted_assets_dir(source_file_path).path_join(source_file_path.get_basename().get_file())
 	ps.metaobj = metaobj
 	ps.asset_database = asset_database
+	ps.material_order_by_mesh_rev = metaobj.internal_data.get("material_order_by_mesh_rev", {})
 	ps.material_to_texture_name = metaobj.internal_data.get("material_to_texture_name", {})
 	ps.godot_sanitized_to_orig_remap = metaobj.internal_data.get("godot_sanitized_to_orig_remap", {})
 	ps.humanoid_original_transforms = metaobj.internal_data.get("humanoid_original_transforms", {})

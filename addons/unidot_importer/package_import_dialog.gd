@@ -4,14 +4,14 @@
 @tool
 extends RefCounted
 
-const package_file: GDScript = preload("./package_file.gd")
-const tarfile: GDScript = preload("./tarfile.gd")
-const import_worker_class: GDScript = preload("./import_worker.gd")
-const meta_worker_class: GDScript = preload("./meta_worker.gd")
-const asset_adapter_class: GDScript = preload("./asset_adapter.gd")
-const asset_database_class: GDScript = preload("./asset_database.gd")
-const object_adapter_class: GDScript = preload("./object_adapter.gd")
-const asset_meta_class: GDScript = preload("./asset_meta.gd")
+const package_file := preload("./package_file.gd")
+const tarfile := preload("./tarfile.gd")
+const import_worker_class := preload("./import_worker.gd")
+const meta_worker_class := preload("./meta_worker.gd")
+const asset_adapter_class := preload("./asset_adapter.gd")
+const asset_database_class := preload("./asset_database.gd")
+const object_adapter_class := preload("./object_adapter.gd")
+const asset_meta_class := preload("./asset_meta.gd")
 
 # Set THREAD_COUNT to 0 to run single-threaded.
 const THREAD_COUNT = 10
@@ -87,6 +87,7 @@ var debug_disable_silhouette_fix_checkbox: CheckBox
 var force_humanoid_checkbox: CheckBox
 var enable_verbose_log_checkbox: CheckBox
 var enable_vrm_spring_bones_checkbox: CheckBox
+var convert_fbx_to_gltf_checkbox: CheckBox
 
 var batch_import_list_widget: ItemList
 var batch_import_add_button: Button
@@ -121,6 +122,8 @@ var asset_models: Array = [].duplicate()
 var asset_yaml_post_model: Array = [].duplicate()
 var asset_prefabs: Array = [].duplicate()
 var asset_scenes: Array = [].duplicate()
+
+var builtin_ufbx_supported: bool = ClassDB.class_exists(&"FBXDocument") and ClassDB.class_exists(&"FBXState")
 
 var result_log_lineedit: TextEdit 
 
@@ -789,6 +792,12 @@ func _selected_package(p_path: String) -> void:
 	enable_vrm_spring_bones_checkbox.toggled.connect(self._enable_vrm_spring_bones_changed)
 	force_humanoid_checkbox = _add_checkbox_option("Import ALL scenes as humanoid retargeted skeletons", true if asset_database.force_humanoid else false)
 	force_humanoid_checkbox.toggled.connect(self._force_humanoid_changed)
+	if builtin_ufbx_supported:
+		convert_fbx_to_gltf_checkbox = _add_advanced_checkbox_option("Convert FBX models to glTF", true if asset_database.convert_fbx_to_gltf else false)
+		convert_fbx_to_gltf_checkbox.toggled.connect(self._convert_fbx_to_gltf_changed)
+	else:
+		convert_fbx_to_gltf_checkbox = _add_checkbox_option("Convert FBX models to glTF\n(Update to Godot 4.3 to disable)", true)
+		convert_fbx_to_gltf_checkbox.disabled = true
 
 	var vspace := Control.new()
 	vspace.custom_minimum_size = Vector2(0, 16)
@@ -948,6 +957,8 @@ func show_importer(ep: EditorPlugin) -> void:
 
 
 func check_fbx2gltf():
+	if builtin_ufbx_supported:
+		return # No need to check for FBX2glTF on engines with native fbx.
 	var d = DirAccess.open("res://")
 	var addon_path: String = new_editor_plugin.get_editor_interface().get_editor_settings().get_setting("filesystem/import/fbx/fbx2gltf_path")
 	if not addon_path.get_file().is_empty():
@@ -1021,6 +1032,9 @@ func _enable_verbose_log_changed(val: bool):
 
 func _enable_vrm_spring_bones_changed(val: bool):
 	asset_database.vrm_spring_bones = val
+
+func _convert_fbx_to_gltf_changed(val: bool):
+	asset_database.convert_fbx_to_gltf = val
 
 func _show_advanced_options_toggled(val: bool):
 	advanced_options_hbox.visible = val
@@ -1333,6 +1347,9 @@ func on_file_completed_godot_import(tw: RefCounted, loaded: bool):
 	asset_work_completed.append(tw)
 
 
+var tmp_material_texture_files: PackedStringArray
+
+
 func do_import_step():
 	if _currently_preprocessing_assets != 0:
 		asset_database.log_fail([null, 0, "", 0], "Import step called during preprocess")
@@ -1386,6 +1403,19 @@ func do_import_step():
 			asset_work_waiting_write.reverse()
 			asset_models = [].duplicate()
 		elif tree_dialog_state == STATE_IMPORTING_MODELS:
+			# Clear stale dummy texture file placeholders.
+			var dres = DirAccess.open("res://")
+			for file_path in tmp_material_texture_files:
+				var fa := FileAccess.open(file_path, FileAccess.READ)
+				if fa == null or fa.get_length() != 0:
+					asset_database.log_debug([null, 0, "", 0], "Dummy texture " + str(file_path) + " is not very dummy")
+					continue
+				fa.close()
+				asset_database.log_debug([null, 0, "", 0], "Removing dummy empty texture " + str(file_path))
+				dres.remove(file_path)
+				dres.remove(file_path + ".import")
+			tmp_material_texture_files.clear()
+
 			update_progress_bar(10)
 			tree_dialog_state = STATE_IMPORTING_YAML_POST_MODEL
 			for tw in asset_yaml_post_model:
@@ -1465,6 +1495,7 @@ func do_import_step():
 	for tw in asset_work:
 		asset_work_currently_importing.push_back(tw)
 		if asset_adapter.uses_godot_importer(tw.asset):
+			asset_adapter.about_to_import(tw.asset)
 			tw.asset.log_debug("asset " + str(tw.asset) + " uses godot import")
 			asset_database.log_debug([null, 0, "", 0], "Importing " + str(tw.asset.pathname) + " with the godot importer...")
 			files_to_reimport.append("res://" + tw.asset.pathname)
@@ -1532,6 +1563,34 @@ func _done_preprocessing_assets():
 	import_worker2.start_threads(THREAD_COUNT)
 	#asset_adapter.write_sentinel_png(generate_sentinel_png_filename())
 
+	# Write temporary dummy texture file placeholders relative to .fbx files so the FBX importer will find them.
+	var dres = DirAccess.open("res://")
+	asset_database.log_debug([null, 0, "", 0], "Go through assets " + str(pkg.guid_to_pkgasset) + ".")
+	for guid in pkg.guid_to_pkgasset:
+		var pkgasset = pkg.guid_to_pkgasset.get(guid, null)
+		asset_database.log_debug([null, 0, "", 0], str(guid) + " " + str(pkgasset)  + " " + str(pkgasset.pathname))
+		var dbgref = [null, 0, "", 0] # [null, pkgasset.parsed_meta.main_object_id, guid, 0]
+		if not pkgasset:
+			continue
+		asset_database.log_debug(dbgref, str(pkgasset.parsed_meta.unique_texture_map))
+		for tex_name in pkgasset.parsed_meta.unique_texture_map:
+			var tex_pathname: String = pkgasset.pathname.get_base_dir().path_join(tex_name)
+			if dres.file_exists(tex_pathname + ".import") or dres.file_exists(tex_pathname):
+				asset_database.log_debug(dbgref, "letsgooo already exists " + str(tex_pathname))
+				tmp_material_texture_files.append(tex_pathname)
+				continue
+			var fa := FileAccess.open(tex_pathname + ".import", FileAccess.WRITE_READ)
+			if fa == null:
+				continue
+			asset_database.log_debug(dbgref, "Writing " + str(tex_pathname))
+			fa.store_buffer("[remap]\n\nimporter=\"skip\"\n".to_utf8_buffer())
+			fa.close()
+			fa = FileAccess.open(tex_pathname, FileAccess.WRITE_READ)
+			asset_database.log_debug(dbgref, "Writing " + str(tex_pathname))
+			fa.close()
+			asset_database.log_debug(dbgref, "letsgooo")
+			tmp_material_texture_files.append(tex_pathname)
+
 	status_bar.text = "Converting textures to metal roughness..."
 	import_worker2.set_stage2(pkg.guid_to_pkgasset)
 	var visited = {}.duplicate()
@@ -1573,6 +1632,8 @@ func start_godot_import(tw: Object):
 			ti.erase_button(0, 0)
 		ti.set_custom_color(0, Color("#22bb66"))
 		ti.set_icon(0, status_success_icon)
+		if tw.asset.parsed_meta != null:
+			tw.asset.parsed_meta.taken_over_import_references.clear()
 		return
 
 	if asset_adapter.uses_godot_importer(tw.asset):
@@ -1893,7 +1954,7 @@ func _asset_tree_window_confirmed():
 		asset_database.log_limit_per_guid = 20000
 	else:
 		asset_database.log_limit_per_guid = 100000
-	status_bar.text = "Preprocessing and converting FBX2glTF..."
+	status_bar.text = "Preprocessing FBX and reading assets ..."
 	_preprocessing_second_pass = second_pass
 	if _currently_preprocessing_assets == 0:
 		_preprocess_second_pass()
