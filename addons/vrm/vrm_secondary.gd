@@ -88,6 +88,7 @@ const collider_group_class = preload("./vrm_collider_group.gd")
 			get_parent().spring_bones = value
 
 var skel: Skeleton3D
+var internal_modifier_node: Node3D
 
 # Props
 
@@ -129,6 +130,16 @@ func _ready() -> void:
 	skel = get_node(skeleton)
 	if skel == null:
 		return  # Not supported.
+
+	if ClassDB.class_exists(&"SkeletonModifier3D"):
+		if internal_modifier_node != null:
+			if internal_modifier_node.get_parent() != null:
+				internal_modifier_node.get_parent().remove_child(internal_modifier_node)
+			internal_modifier_node.queue_free()
+		internal_modifier_node = ClassDB.instantiate("SkeletonModifier3D")
+		internal_modifier_node.name = "VRM_internal_skeleton_modifier"
+		skel.add_child(internal_modifier_node, false, Node.INTERNAL_MODE_BACK)
+		internal_modifier_node.connect(&"modification_processed", self._on_secondary_process_modification_processed)
 
 	spring_bones_cached = spring_bones
 	var gizmo_spring_bone: bool = false
@@ -224,24 +235,8 @@ func check_for_editor_update() -> bool:
 		return false
 	if is_child_of_vrm:
 		var parent: Node = get_parent()
-		if parent.springbone_gravity_rotation != springbone_gravity_rotation or parent.springbone_gravity_multiplier != springbone_gravity_multiplier or parent.springbone_add_force != springbone_add_force:
-			springbone_add_force = parent.springbone_add_force
-			springbone_gravity_rotation = parent.springbone_gravity_rotation
-			springbone_gravity_multiplier = parent.springbone_gravity_multiplier
-			modify_gravity = true
-		if parent.disable_colliders != disable_colliders:
-			disable_colliders = parent.disable_colliders
-			for sb in spring_bones_internal:
-				sb.disable_colliders = disable_colliders
-		override_springbone_center = parent.override_springbone_center
-		default_springbone_center = parent.default_springbone_center
 		if parent.update_in_editor != update_in_editor:
 			update_in_editor = parent.update_in_editor
-	if modify_gravity:
-		for sb in spring_bones_internal:
-			sb.add_force = springbone_add_force
-			sb.gravity_rotation = springbone_gravity_rotation
-			sb.gravity_multiplier = springbone_gravity_multiplier
 	return update_in_editor
 
 
@@ -282,9 +277,27 @@ func tick_spring_bones(delta: float) -> void:
 	# our setter syncs it the other direction.
 	if is_child_of_vrm:
 		var parent: Node = get_parent()
+	var parent: Node = get_parent()
+	if is_child_of_vrm:
+		if parent.springbone_gravity_rotation != springbone_gravity_rotation or parent.springbone_gravity_multiplier != springbone_gravity_multiplier or parent.springbone_add_force != springbone_add_force:
+			springbone_add_force = parent.springbone_add_force
+			springbone_gravity_rotation = parent.springbone_gravity_rotation
+			springbone_gravity_multiplier = parent.springbone_gravity_multiplier
+			modify_gravity = true
+		if parent.disable_colliders != disable_colliders:
+			disable_colliders = parent.disable_colliders
+			for sb in spring_bones_internal:
+				sb.disable_colliders = disable_colliders
+		override_springbone_center = parent.override_springbone_center
+		default_springbone_center = parent.default_springbone_center
 		if spring_bones != parent.spring_bones:
 			spring_bones = parent.spring_bones
 			needs_reintialize = true
+	if modify_gravity:
+		for sb in spring_bones_internal:
+			sb.add_force = springbone_add_force
+			sb.gravity_rotation = springbone_gravity_rotation
+			sb.gravity_multiplier = springbone_gravity_multiplier
 	for spring_i in range(len(spring_bones_internal)):
 		needs_reintialize = spring_bones_internal[spring_i].pre_update() or needs_reintialize
 
@@ -307,33 +320,40 @@ func tick_spring_bones(delta: float) -> void:
 			secondary_gizmo.draw_in_game()
 
 
-# Called every frame. 'delta' is the elapsed time since the previous frame.
-func _process(delta: float) -> void:
-	if not update_secondary_fixed:
-		if not Engine.is_editor_hint() or check_for_editor_update():
-			tick_spring_bones(delta)
-		elif Engine.is_editor_hint():
-			if secondary_gizmo != null:
-				if skel != null:
-					var skel_transform: Transform3D = skel.global_transform
-					update_centers(skel_transform)
-					for collider_i in range(len(colliders_internal)):
-						colliders_internal[collider_i].update(skel_transform, center_transforms[colliders_centers[collider_i]], skel)
-					secondary_gizmo.draw_in_editor()
+func _process(delta: float):
+	if not ClassDB.class_exists(&"SkeletonModifier3D"):
+		if not update_secondary_fixed:
+			do_process(delta)
 
 
 func _physics_process(delta: float) -> void:
-	if update_secondary_fixed:
-		if not Engine.is_editor_hint() or check_for_editor_update():
-			tick_spring_bones(delta)
-		elif Engine.is_editor_hint():
-			if secondary_gizmo != null:
-				if skel != null:
-					var skel_transform: Transform3D = skel.global_transform
-					update_centers(skel_transform)
-					for collider_i in range(len(colliders_internal)):
-						colliders_internal[collider_i].update(skel_transform, center_transforms[colliders_centers[collider_i]], skel)
-					secondary_gizmo.draw_in_editor()
+	if not ClassDB.class_exists(&"SkeletonModifier3D"):
+		if update_secondary_fixed:
+			do_process(delta)
+
+
+func _on_secondary_process_modification_processed() -> void:
+	var delta: float
+	# MODIFIER_CALLBACK_MODE_PROCESS_PHYSICS = 0
+	if skel.modifier_callback_mode_process == 0:
+		delta = get_physics_process_delta_time()
+	else:
+		delta = get_process_delta_time()
+	do_process(delta)
+
+
+# Called every frame. 'delta' is the elapsed time since the previous frame.
+func do_process(delta: float) -> void:
+	if not Engine.is_editor_hint() or check_for_editor_update():
+		tick_spring_bones(delta)
+	elif Engine.is_editor_hint():
+		if secondary_gizmo != null:
+			if skel != null:
+				var skel_transform: Transform3D = skel.global_transform
+				update_centers(skel_transform)
+				for collider_i in range(len(colliders_internal)):
+					colliders_internal[collider_i].update(skel_transform, center_transforms[colliders_centers[collider_i]], skel)
+				secondary_gizmo.draw_in_editor()
 
 
 class SecondaryGizmo:
@@ -363,6 +383,8 @@ class SecondaryGizmo:
 			draw_collider_groups()
 
 	func draw_spring_bones(color: Color) -> void:
+		if secondary_node.spring_bones_internal.is_empty():
+			return
 		set_material_override(m)
 		var i: int = 0
 		var s_sk: Skeleton3D = secondary_node.skel
@@ -384,6 +406,8 @@ class SecondaryGizmo:
 		mesh.surface_end()
 
 	func draw_collider_groups() -> void:
+		if secondary_node.colliders_internal.is_empty():
+			return
 		set_material_override(m)
 		var i: int = 0
 		mesh.surface_begin(Mesh.PRIMITIVE_LINES)

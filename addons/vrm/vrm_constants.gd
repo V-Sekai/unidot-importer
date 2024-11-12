@@ -68,3 +68,12 @@ static func get_vrm_to_human_bone(is_vrm_0) -> Dictionary:
 		vrm0_to_human_bone["rightThumbProximal"] = "RightThumbMetacarpal"
 		return vrm0_to_human_bone
 	return vrm_to_human_bone
+
+enum HeadHidingSetting {
+	ThirdPersonOnly = 0,
+	FirstPersonOnly = 1,
+	FirstPersonOnlyWithShadow = 2,
+	BothLayers = 3,
+	BothLayersWithShadow = 4,
+	IgnoreHeadHiding = 5,
+}

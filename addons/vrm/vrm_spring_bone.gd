@@ -132,8 +132,9 @@ class SpringBoneRuntimeState:
 			springbone.joint_nodes != joint_nodes or
 			springbone.collider_groups != cached_collider_groups):
 			return true
-		for i in range(len(verlets)):
-			verlets[i].pre_update(skel)
+		if not ClassDB.class_exists(&"SkeletonModifier3D"):
+			for i in range(len(verlets)):
+				verlets[i].pre_update(skel)
 		return false
 
 
@@ -150,7 +151,7 @@ class SpringBoneRuntimeState:
 		for i in range(len(verlets)):
 			var pfa: PackedFloat64Array = springbone.gravity_power
 			var external: Vector3 = (springbone.gravity_dir[i] if i < len(springbone.gravity_dir) else springbone.gravity_dir_default)
-			external = external * (1.0 if pfa.is_empty() else pfa[i] if i < len(pfa) else pfa[-1]) * delta * springbone.gravity_scale
+			external = external * (1.0 if pfa.is_empty() else pfa[i] if i < len(pfa) else pfa[-1]) * delta * springbone.gravity_scale * gravity_multiplier
 			if !gravity_rotation.is_equal_approx(Quaternion.IDENTITY):
 				external = gravity_rotation * external
 			if !center_transform.basis.is_equal_approx(Basis.IDENTITY):

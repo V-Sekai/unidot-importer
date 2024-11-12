@@ -276,7 +276,7 @@ func _create_animation(default_values: Dictionary, default_blend_shapes: Diction
 		var node: ImporterMeshInstance3D = node_maybe as ImporterMeshInstance3D
 		var nodeMesh: ImporterMesh = node.mesh
 
-		if bind["index"] < 0 || bind["index"] >= nodeMesh.get_blend_shape_count():
+		if nodeMesh == null || bind["index"] < 0 || bind["index"] >= nodeMesh.get_blend_shape_count():
 			printerr("Invalid blend shape index in bind " + str(expression) + " for mesh " + str(node.name))
 			continue
 		var animtrack: int = anim.add_track(Animation.TYPE_BLEND_SHAPE)
@@ -292,7 +292,7 @@ func _create_animation(default_values: Dictionary, default_blend_shapes: Diction
 		#print("Bind index: " + str(bind["index"]))
 		#print("Bind weight: " + str(float(bind["weight"]) / 100.0))
 		var head_hidden_node: ImporterMeshInstance3D = node_to_head_hidden_node.get(node, null)
-		if head_hidden_node != null:
+		while head_hidden_node != null:
 			animtrack = anim.add_track(Animation.TYPE_BLEND_SHAPE)
 			# nodeMesh.set_blend_shape_name(int(bind["index"]), shape["name"] + "_" + str(bind["index"]))
 			anim_path = str(animplayer.get_parent().get_path_to(head_hidden_node)) + ":" + str(nodeMesh.get_blend_shape_name(int(bind["index"])))
@@ -301,6 +301,7 @@ func _create_animation(default_values: Dictionary, default_blend_shapes: Diction
 			# FIXME: Godot has weird normal/tangent singularities at weight=1.0 or weight=0.5
 			anim.blend_shape_track_insert_key(animtrack, input_key, extra_weight * 0.99999 * float(bind["weight"]) / 100.0)
 			default_blend_shapes[anim_path] = 0.0  # TODO: Find the default value from gltf??
+			head_hidden_node = node_to_head_hidden_node.get(head_hidden_node, null)
 	return anim
 
 
@@ -314,7 +315,6 @@ func _create_animation_player(animplayer: AnimationPlayer, vrm_extension: Dictio
 	var animation_library: AnimationLibrary = AnimationLibrary.new()
 
 	var materials = gstate.get_materials()
-	var meshes = gstate.get_meshes()
 	var nodes = gstate.get_nodes()
 
 	var firstperson = vrm_extension.get("firstPerson", {})
@@ -324,7 +324,6 @@ func _create_animation_player(animplayer: AnimationPlayer, vrm_extension: Dictio
 
 	var head_relative_bones: Dictionary = {}  # To determine which meshes to hide.
 
-	var mesh_to_head_hidden_mesh: Dictionary = {}
 	var node_to_head_hidden_node: Dictionary = {}
 
 	var lefteye: int = human_bone_to_idx.get("leftEye", -1)
@@ -364,66 +363,11 @@ func _create_animation_player(animplayer: AnimationPlayer, vrm_extension: Dictio
 
 	var mesh_annotations_by_node = {}
 	for meshannotation in firstperson.get("meshAnnotations", []):
-		mesh_annotations_by_node[int(meshannotation["node"])] = meshannotation
+		mesh_annotations_by_node[int(meshannotation["node"])] = meshannotation.get("type", "auto")
 
-	for node_idx in range(len(nodes)):
-		var gltf_node: GLTFNode = nodes[node_idx]
-		var node: Node = gstate.get_scene_node(node_idx)
-		if node is ImporterMeshInstance3D:
-			var meshannotation = mesh_annotations_by_node.get(node_idx, {})
+	vrm_utils.perform_head_hiding(gstate, mesh_annotations_by_node, head_relative_bones, node_to_head_hidden_node)
 
-			var flag: String = meshannotation.get("type", "auto")
-
-			# Non-skinned meshes: use flag.
-			var mesh: ImporterMesh = node.mesh
-			var head_hidden_mesh: ImporterMesh = mesh
-			if flag == "auto":
-				if node.skin == null:
-					var parent_node = node.get_parent()
-					if parent_node is BoneAttachment3D:
-						if head_relative_bones.has(parent_node.bone_name):
-							flag = "thirdPersonOnly"
-				else:
-					var blend_shape_names: Dictionary = vrm_utils._extract_blendshape_names(gstate.json)
-					if node_idx in blend_shape_names.keys():
-						head_hidden_mesh = vrm_utils._generate_hide_bone_mesh(mesh, node.skin, head_relative_bones, blend_shape_names[node_idx])
-					else:
-						head_hidden_mesh = vrm_utils._generate_hide_bone_mesh(mesh, node.skin, head_relative_bones, [])
-					if head_hidden_mesh == null:
-						flag = "thirdPersonOnly"
-					if head_hidden_mesh == mesh:
-						flag = "both"  # Nothing to do: No head verts.
-
-			var layer_mask: int = 6  # "both"
-			if flag == "thirdPersonOnly":
-				layer_mask = 4
-			elif flag == "firstPersonOnly":
-				layer_mask = 2
-
-			if flag == "auto" and head_hidden_mesh != mesh:  # If it is still "auto", we have something to hide.
-				mesh_to_head_hidden_mesh[mesh] = head_hidden_mesh
-				var head_hidden_node: ImporterMeshInstance3D = ImporterMeshInstance3D.new()
-				head_hidden_node.name = node.name + " (Headless)"
-				head_hidden_node.skin = node.skin
-				head_hidden_node.mesh = head_hidden_mesh
-				head_hidden_node.skeleton_path = node.skeleton_path
-				head_hidden_node.script = importer_mesh_attributes
-				head_hidden_node.layers = 2  # ImporterMeshInstance3D is missing APIs.
-				head_hidden_node.first_person_flag = "head_removed"
-				node.add_sibling(head_hidden_node)
-				head_hidden_node.owner = node.owner
-				var gltf_mesh: GLTFMesh = GLTFMesh.new()
-				gltf_mesh.mesh = head_hidden_mesh
-				# FIXME: do we need to assign gltf_mesh.instance_materials?
-				meshes.append(gltf_mesh)
-				node_to_head_hidden_node[node] = head_hidden_node
-				layer_mask = 4
-
-			node.script = importer_mesh_attributes
-			node.layers = layer_mask
-			node.first_person_flag = flag
-	gstate.meshes = meshes
-
+	var meshes = gstate.get_meshes()
 	var expressions = vrm_extension.get("expressions", {})
 	# FIXME: Do we need to handle multiple references to the same mesh???
 	var mesh_idx_to_meshinstance: Dictionary = {}
@@ -922,27 +866,8 @@ func _export_post(gstate: GLTFState) -> Error:
 	for i in range(len(json_gltf_nodes)):
 		if json_gltf_nodes[i].has("extensions") and json_gltf_nodes[i]["extensions"].is_empty():
 			json_gltf_nodes[i].erase("extensions")
-		if json_gltf_nodes[i]["name"] == "Root":
-			print("Found a Root at index " + str(i))
-		if json_gltf_nodes[i]["name"] == "BoneNodeConstraintApplier":
-			print("Found a BoneNodeConstraintApplier at index " + str(i))
-			json_gltf_nodes[i]["name"] = "_unused_applier"
 	var root_node: Node3D = gstate.get_meta("vrm_root")
 	var json: Dictionary = gstate.json
-
-	# HACK: Avoid extra root node to make sure export/import is idempotent.
-	var gltf_root_nodes: Array = json["scenes"][0]["nodes"]
-	if len(gltf_root_nodes) == 1 and json.get("extensionsUsed", []).count("GODOT_single_root") == 0:
-		var orig_gltf_root_node: Dictionary = json["nodes"][gltf_root_nodes[0]]
-		var orig_children: Array = orig_gltf_root_node["children"]
-		#print("Orig root: " + orig_gltf_root_node["name"])
-		#print("First child: " + json["nodes"][orig_children[0]]["name"])
-		orig_gltf_root_node["name"] = "_unused"  # Removing nodes in glTF is very difficulty.
-		orig_gltf_root_node.erase("children")
-		gltf_root_nodes.clear()
-		gltf_root_nodes.append_array(orig_children)
-		#print(gltf_root_nodes)
-		#print(orig_children)
 
 	var gltf_nodes: Array[GLTFNode] = gstate.nodes
 	var godot_node_to_gltf_mesh_node_idx: Dictionary = {}
@@ -1028,7 +953,10 @@ func _export_post(gstate: GLTFState) -> Error:
 
 func _import_preflight(gstate: GLTFState, extensions: PackedStringArray = PackedStringArray()) -> Error:
 	if not extensions.has("VRMC_vrm"):
-		return ERR_INVALID_DATA
+		return ERR_SKIP
+	if typeof(gstate.get_additional_data(&"vrm/already_processed")) != TYPE_NIL:
+		return ERR_SKIP
+	gstate.set_additional_data(&"vrm/already_processed", true)
 	var gltf_json_parsed: Dictionary = gstate.json
 	var gltf_nodes = gltf_json_parsed["nodes"]
 	if not _add_vrm_nodes_to_skin(gltf_json_parsed):
@@ -1043,6 +971,14 @@ func _import_preflight(gstate: GLTFState, extensions: PackedStringArray = Packed
 			node["name"] = "AnimationPlayer_"
 		if node.get("name", "") == "BoneNodeConstraintApplier":
 			node["name"] = "BoneNodeConstraintApplier_"
+	return OK
+
+
+func _import_post_parse(state: GLTFState) -> Error:
+	var nodes := state.get_nodes()
+	for n in nodes:
+		if typeof(n.get_additional_data(&"GODOT_rest_transform")) == TYPE_NIL:
+			n.set_additional_data(&"GODOT_rest_transform", n.get_xform())
 	return OK
 
 

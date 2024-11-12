@@ -36,7 +36,7 @@ Import and export of VRM through version 1.0 is supported. Here is a feature bre
 * `VRMC_springBone`: ✅Implemented, but needs optimization.
 * `VRMC_materials_hdr_emissive`: ✅Implemented
 * `VRMC_vrm`: ✅Implemented
-	* `firstPerson`: ⚠️Head hiding implemented (camera layers or runtime script needed)
+	* `firstPerson`: ⚠️Head hiding implemented and supported as an import option (camera layers or runtime script needed)
 	* `eyeOffset`: ✅I️mplemented (`BoneAttachment3D` `"LookOffset"` on `Head`)
 	* `lookAt`: ⚠Only creates animation tracks (application must create `BlendSpace2D`)
 	* `expressions` (mood, viseme):
@@ -49,6 +49,31 @@ Import and export of VRM through version 1.0 is supported. Here is a feature bre
 
 * Support VRMC_vrm_animation:
 	* Not yet implemented. Intended use: humanoid AnimationLibrary import/export.
+
+## A note about SkeletonModifier3D on Godot 4.3 and later.
+
+godot-vrm currently creates an internal node child of the Skeleton3D to facilitate processing the skeleton modifiers for
+VRM spring bones and node constraints.
+
+Due to the behavior of skeleton modifier, there may be some differences.
+For example, on Godot 4.3+, `update_secondary_fixed` is no longer supported: instead, the Skeleton node determines whether to use physics or idle processing.
+
+## Head hiding settings
+
+At import time, there are new scene import settings for .vrm files.
+
+For runtime usage, head hiding mode is determined by various additional data properties on the GLTFState object:
+`vrm/head_hiding_method` is an enum `vrm_constants.HeadHidingSetting` that determines the mode.
+
+For BothLayers and BothLayersWithShadow modes, the MeshInstance3D layers are determined by the
+`vrm/first_person_layers` and `vrm/third_person_layers` integers respectively.
+
+For FirstPersonOnlyWithShadow, FirstPersonOnly and ThirdPersonOnly, certain meshes are deleted or modified to make the character suitable for first person or third person usage.
+
+Shadow modes will create an additional mesh for hidden heads set to ShadowsOnly to allow the hidden head to still cast a shadow.
+Recommended if your game has a first person mode and uses lights with shadows enabled.
+
+Finally, there is an IgnoreHeadHiding mode which disables handling of the firstPerson flags and acts like an ordinary glTF import.
 
 ## Note for users of Godot 3.x
 

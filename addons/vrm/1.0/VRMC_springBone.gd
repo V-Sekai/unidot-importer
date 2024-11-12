@@ -317,7 +317,7 @@ func _export_post(state: GLTFState):
 	var json_nodes: Array = json["nodes"]
 	for i in range(len(json_nodes)):
 		godot_node_to_idx[state.get_scene_node(i)] = i
-	godot_node_to_idx[secondary.get_parent()] = godot_node_to_idx[secondary]
+	# godot_node_to_idx[secondary.get_parent()] = godot_node_to_idx[secondary]
 
 	var json_colliders: Array = []
 	for collider in colliders:

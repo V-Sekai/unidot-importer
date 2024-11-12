@@ -3,6 +3,8 @@ extends RefCounted
 const ROTATE_180_BASIS = Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, -1))
 const ROTATE_180_TRANSFORM = Transform3D(ROTATE_180_BASIS, Vector3.ZERO)
 
+const vrm_constants_class = preload("./vrm_constants.gd")
+const importer_mesh_attributes = preload("./importer_mesh_attributes.gd")
 
 static func adjust_mesh_zforward(mesh: ImporterMesh, blendshapes: Array):
 	# MESH and SKIN data divide, to compensate for object position multiplying.
@@ -49,10 +51,10 @@ static func adjust_mesh_zforward(mesh: ImporterMesh, blendshapes: Array):
 			bsarr[bsidx].resize(ArrayMesh.ARRAY_MAX)
 
 		surf_data_by_mesh.push_back({"prim": prim, "arr": arr, "bsarr": bsarr, "lods": lods, "fmt_compress_flags": fmt_compress_flags, "name": name, "mat": mat})
-	mesh.clear()
 	if blendshapes.is_empty():
 		for bsidx in mesh.get_blend_shape_count():
 			blendshapes.append(mesh.get_blend_shape_name(bsidx))
+	mesh.clear()
 	for blend_name in blendshapes:
 		mesh.add_blend_shape(blend_name)
 	for surf_idx in range(surf_count):
@@ -80,7 +82,8 @@ static func rotate_scene_180_inner(p_node: Node3D, mesh_set: Dictionary, skin_se
 		if p_node.skin != null:
 			skin_set[p_node.skin] = true
 	for child in p_node.get_children():
-		rotate_scene_180_inner(child, mesh_set, skin_set)
+		if child is Node3D:
+			rotate_scene_180_inner(child, mesh_set, skin_set)
 
 
 static func rotate_scene_180(p_scene: Node3D, blend_shape_names: Dictionary):
@@ -430,6 +433,146 @@ static func _generate_hide_bone_mesh(mesh: ImporterMesh, skin: Skin, bone_names_
 		var mat: Material = surf_data_by_mesh[surf_idx].get("mat")
 		new_mesh.add_surface(prim, arr, bsarr, lods, mat, name, fmt_compress_flags)
 	return new_mesh
+
+
+static func perform_head_hiding(gstate: GLTFState, mesh_annotations_by_node: Dictionary, head_relative_bones: Dictionary, node_to_head_hidden_node: Dictionary):
+	var meshes = gstate.get_meshes()
+	var nodes = gstate.get_nodes()
+
+	var head_hiding_method_prop = gstate.get_additional_data(&"vrm/head_hiding_method")
+	var head_hiding_method := vrm_constants_class.HeadHidingSetting.ThirdPersonOnly
+	if typeof(head_hiding_method_prop) == TYPE_INT:
+		head_hiding_method = head_hiding_method_prop
+	if head_hiding_method == vrm_constants_class.HeadHidingSetting.IgnoreHeadHiding:
+		return
+
+	var layer_mask_first_prop = gstate.get_additional_data(&"vrm/first_person_layers")
+	var layer_mask_first := 2
+	if typeof(layer_mask_first_prop) == TYPE_INT:
+		layer_mask_first = layer_mask_first_prop
+	var layer_mask_third_prop = gstate.get_additional_data(&"vrm/third_person_layers")
+	var layer_mask_third := 4
+	if typeof(layer_mask_third_prop) == TYPE_INT:
+		layer_mask_third = layer_mask_third_prop
+
+	for node_idx in range(len(nodes)):
+		var gltf_node: GLTFNode = nodes[node_idx]
+		var node_node: Node = gstate.get_scene_node(node_idx)
+		if node_node is ImporterMeshInstance3D:
+			var node := node_node as ImporterMeshInstance3D
+			var flag: String = mesh_annotations_by_node.get(node_idx, "auto")
+
+			# Non-skinned meshes: use flag.
+			var mesh: ImporterMesh = node.mesh
+			var head_hidden_mesh: ImporterMesh = mesh
+			if flag == "auto" and head_hiding_method != vrm_constants_class.HeadHidingSetting.ThirdPersonOnly:
+				if node.skin == null:
+					var parent_node = node.get_parent()
+					if parent_node is BoneAttachment3D:
+						if head_relative_bones.has(parent_node.bone_name):
+							flag = "thirdPersonOnly"
+				else:
+					var blend_shape_names: Dictionary = _extract_blendshape_names(gstate.json)
+					if node_idx in blend_shape_names.keys():
+						head_hidden_mesh = _generate_hide_bone_mesh(mesh, node.skin, head_relative_bones, blend_shape_names[node_idx])
+					else:
+						head_hidden_mesh = _generate_hide_bone_mesh(mesh, node.skin, head_relative_bones, [])
+					if head_hidden_mesh == null:
+						flag = "thirdPersonOnly"
+					if head_hidden_mesh == mesh:
+						flag = "both"  # Nothing to do: No head verts.
+
+			var layer_mask: int = layer_mask_first | layer_mask_third  # "both"
+			if flag == "thirdPersonOnly":
+				layer_mask = layer_mask_third
+				if head_hiding_method == vrm_constants_class.HeadHidingSetting.FirstPersonOnly:
+					node.mesh = null # FIXME: How to exclude this node?
+					continue
+			elif flag == "firstPersonOnly":
+				layer_mask = layer_mask_first
+				if head_hiding_method == vrm_constants_class.HeadHidingSetting.ThirdPersonOnly:
+					node.mesh = null # FIXME: How to exclude this node?
+					continue
+
+			node.script = importer_mesh_attributes
+			node.layers = node.orig_layers
+			node.shadow = node.orig_shadow
+
+			var head_hidden_node: ImporterMeshInstance3D = null
+			var duplicate_shadow_node: ImporterMeshInstance3D = null
+
+			if head_hiding_method == vrm_constants_class.HeadHidingSetting.FirstPersonOnlyWithShadow:
+				if flag == "firstPersonOnly":
+					layer_mask = layer_mask_first
+					node.shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				if flag == "thirdPersonOnly":
+					node.shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+
+			if flag == "auto" and head_hidden_mesh != mesh:  # If it is still "auto", we have something to hide.
+				if (head_hiding_method == vrm_constants_class.HeadHidingSetting.BothLayers or
+						head_hiding_method == vrm_constants_class.HeadHidingSetting.BothLayersWithShadow or
+						head_hiding_method == vrm_constants_class.HeadHidingSetting.FirstPersonOnlyWithShadow):
+					head_hidden_node = ImporterMeshInstance3D.new()
+					head_hidden_node.name = node.name + " (Headless)"
+					head_hidden_node.skin = node.skin
+					head_hidden_node.mesh = head_hidden_mesh
+					head_hidden_node.skeleton_path = node.skeleton_path
+					head_hidden_node.script = importer_mesh_attributes
+					head_hidden_node.layers = node.layers
+					head_hidden_node.first_person_flag = "head_removed"
+					node.add_sibling(head_hidden_node)
+					head_hidden_node.owner = node.owner
+					var gltf_mesh: GLTFMesh = GLTFMesh.new()
+					gltf_mesh.mesh = head_hidden_mesh
+					# FIXME: do we need to assign gltf_mesh.instance_materials?
+					meshes.append(gltf_mesh)
+					node_to_head_hidden_node[node] = head_hidden_node
+					layer_mask = layer_mask_third
+				elif head_hiding_method == vrm_constants_class.HeadHidingSetting.FirstPersonOnly:
+					for m in meshes:
+						if m.mesh == mesh:
+							m.mesh = head_hidden_mesh
+					node.mesh = head_hidden_mesh
+
+			if head_hidden_node != null:
+				if head_hiding_method == vrm_constants_class.HeadHidingSetting.FirstPersonOnlyWithShadow:
+					node.shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			if head_hiding_method == vrm_constants_class.HeadHidingSetting.BothLayersWithShadow:
+				if flag == "thirdPersonOnly" or head_hidden_node != null:
+					duplicate_shadow_node = ImporterMeshInstance3D.new()
+					duplicate_shadow_node.name = node.name + " (Shadow)"
+					duplicate_shadow_node.skin = node.skin
+					duplicate_shadow_node.mesh = mesh
+					duplicate_shadow_node.skeleton_path = node.skeleton_path
+					duplicate_shadow_node.script = importer_mesh_attributes
+					duplicate_shadow_node.layers = node.layers
+					duplicate_shadow_node.shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+					duplicate_shadow_node.first_person_flag = "head_removed"
+					node.add_sibling(duplicate_shadow_node)
+					duplicate_shadow_node.owner = node.owner
+					if head_hidden_node != null:
+						node_to_head_hidden_node[duplicate_shadow_node] = head_hidden_node
+					node_to_head_hidden_node[node] = duplicate_shadow_node
+
+			if (layer_mask_first != 0 and layer_mask != 0 and
+					(head_hiding_method == vrm_constants_class.HeadHidingSetting.BothLayers or 
+					head_hiding_method == vrm_constants_class.HeadHidingSetting.BothLayersWithShadow)):
+				if node.layers & layer_mask_first == 0 or node.layers & layer_mask_third == 0:
+					if head_hidden_node != null:
+						head_hidden_node.layers = layer_mask_first
+					if duplicate_shadow_node != null:
+						duplicate_shadow_node.layers = layer_mask_first
+					node.layers = layer_mask
+				else:
+					if head_hidden_node != null:
+						head_hidden_node.layers = node.layers & layer_mask_first
+					if duplicate_shadow_node != null:
+						duplicate_shadow_node.layers = node.layers & layer_mask_first
+					node.layers = node.layers & layer_mask
+
+
+			node.first_person_flag = flag
+	gstate.meshes = meshes
 
 
 static func _extract_blendshape_names(gltf_json: Dictionary) -> Dictionary:
