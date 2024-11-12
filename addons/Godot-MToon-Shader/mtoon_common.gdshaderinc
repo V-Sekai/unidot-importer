@@ -269,7 +269,7 @@ void fragment() {
 	vec3 viewCameraUp = vec3(0.0,1.0,0.0);//normalize(INV_VIEW_MATRIX[1].xyz); // FIXME!!
 	vec3 viewViewUp = normalize(viewCameraUp - viewView * dot(viewView, viewCameraUp));
 	vec3 viewViewRight = normalize(cross(viewView, viewViewUp));
-	vec2 matcapUv = vec2(-dot(viewViewRight, viewNormal), dot(viewViewUp, viewNormal)) * 0.5 + 0.5;
+	vec2 matcapUv = vec2(-dot(viewViewRight, viewNormal), -dot(viewViewUp, viewNormal)) * 0.5 + 0.5;
 	vec3 matcapLighting = _MatcapColor.rgb * texture(_SphereAdd, matcapUv).rgb;
 
 	rim = (rim + matcapLighting) * texture(_RimTexture, mainUv).rgb;
